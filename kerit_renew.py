@@ -188,49 +188,6 @@ EXPAND_POPUP_JS = """
 })();
 """
 
-# 注入 postMessage 监听器：捕获 CF Turnstile complete 事件
-INJECT_TOKEN_LISTENER_JS = """
-(function() {
-    window.__cf_turnstile_token__ = '';
-    if (window.__cf_token_listener_injected__) return;
-    window.__cf_token_listener_injected__ = true;
-
-    window.addEventListener('message', function(e) {
-        if (!e.origin || e.origin.indexOf('cloudflare.com') === -1) return;
-        var d = e.data;
-        if (!d || d.event !== 'complete' || !d.token) return;
-
-        console.log('[TokenCapture] complete event, token length:', d.token.length);
-        window.__cf_turnstile_token__ = d.token;
-
-        var inputs = document.querySelectorAll(
-            'input[name="cf-turnstile-response"], input[name="cf_turnstile_response"]'
-        );
-        for (var i = 0; i < inputs.length; i++) {
-            try {
-                var nativeSet = Object.getOwnPropertyDescriptor(
-                    HTMLInputElement.prototype, 'value'
-                ).set;
-                nativeSet.call(inputs[i], d.token);
-                inputs[i].dispatchEvent(new Event('input',  {bubbles: true}));
-                inputs[i].dispatchEvent(new Event('change', {bubbles: true}));
-                console.log('[TokenCapture] wrote token to input:', inputs[i].name);
-            } catch(err) {
-                inputs[i].value = d.token;
-            }
-        }
-    });
-    console.log('[TokenCapture] postMessage listener injected');
-})();
-"""
-
-READ_CAPTURED_TOKEN_JS = """
-(function(){
-    return window.__cf_turnstile_token__ || '';
-})()
-"""
-
-
 def xdotool_click(x, y):
     x, y = int(x), int(y)
     try:
@@ -341,32 +298,17 @@ def get_window_offset(sb):
 
 def check_token(sb) -> bool:
     try:
-        input_ok = sb.execute_script("""
+        return sb.execute_script("""
             (function(){
                 var input = document.querySelector('input[name="cf-turnstile-response"]');
                 return input && input.value && input.value.length > 20;
             })()
         """)
-        if input_ok:
-            return True
     except Exception:
-        pass
-    try:
-        token = sb.execute_script(READ_CAPTURED_TOKEN_JS)
-        if token and len(token) > 20:
-            return True
-    except Exception:
-        pass
-    return False
+        return False
 
 
 def get_token_value(sb) -> str:
-    try:
-        token = sb.execute_script(READ_CAPTURED_TOKEN_JS)
-        if token and len(token) > 20:
-            return token
-    except Exception:
-        pass
     try:
         token = sb.execute_script("""
             (function(){
@@ -395,36 +337,28 @@ def solve_turnstile(sb) -> bool:
         sb.execute_script(EXPAND_POPUP_JS)
         time.sleep(0.5)
 
-    try:
-        sb.execute_script(INJECT_TOKEN_LISTENER_JS)
-        print("📡 开始监控Cloudflare Turnstile Token...")
-    except Exception as e:
-        print(f"⚠️ 监听器注入失败：{e}")
-
     if check_token(sb):
-        print("✅ 验证已自动通过")
+        print("✅ Token已存在")
         return True
 
     coords = get_turnstile_coords(sb)
     if not coords:
-        print("❌ 验证坐标获取失败")
-        sb.save_screenshot("turnstile_no_coords.png")
+        print("❌ 无法获取坐标")
         return False
 
     win_x, win_y, toolbar = get_window_offset(sb)
     abs_x = coords['click_x'] + win_x
     abs_y = coords['click_y'] + win_y + toolbar
-    print(f"📐 坐标计算完成")
+    print(f"🖱️ 点击Token: ({abs_x}, {abs_y})")
     xdotool_click(abs_x, abs_y)
 
-    for i in range(30):
+    for _ in range(30):
         time.sleep(0.5)
         if check_token(sb):
-            token = get_token_value(sb)
-            print(f"✅ Cloudflare Turnstile 验证通过！token：{token[:50]}...")
+            print("✅ Cloudflare Token通过")
             return True
 
-    print("❌ 人机验证超时")
+    print("❌ Cloudflare Token超时")
     sb.save_screenshot("turnstile_fail.png")
     return False
 
@@ -463,18 +397,6 @@ def do_renew(sb):
         "(function(){ return typeof serverData !== 'undefined' ? serverData.id : null; })()"
     )
     if not server_id:
-        # 备选：从页面 Identifier 字段读取
-        server_id = sb.execute_script("""
-            (function(){
-                var els = Array.from(document.querySelectorAll('td, dd, span, div'));
-                for (var i = 0; i < els.length; i++) {
-                    var text = (els[i].innerText || '').trim();
-                    if (/^\d{6,}$/.test(text)) return text;
-                }
-                return null;
-            })()
-        """)
-    if not server_id:
         print("❌ serverData.id缺失")
         sb.save_screenshot("no_server_id.png")
         send_tg("❌ serverData.id缺失，续期失败")
@@ -504,12 +426,12 @@ def do_renew(sb):
                 return el ? parseInt(el.innerText || "0") : 0;
             })()
         """)
-        remaining = extract_remaining_days(sb)
-        print(f"📊 续期进度: {count}/7  ⏱️ 剩余: {remaining}天")
+        print(f"📊 续期进度: {count}/7")
 
         if count >= 7:
             print("🎉 已达上限7/7，提前结束")
             sb.save_screenshot("renew_full.png")
+            remaining = extract_remaining_days(sb)
             send_tg("✅ 续期完成", server_id, remaining)
             return
 
